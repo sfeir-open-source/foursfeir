@@ -10,9 +10,10 @@ type HeaderProps = {
   user: Profile;
   admin: AdminInfo | null;
   cities: City[];
+  favoriteCity: string | null;
 };
 
-export function Header({ breadcrumbs, user, admin, cities }: HeaderProps) {
+export function Header({ breadcrumbs, user, admin, cities, favoriteCity }: HeaderProps) {
   return (
     <header className="header header-flex container-fluid">
       <nav aria-label="breadcrumb">
@@ -43,8 +44,13 @@ export function Header({ breadcrumbs, user, admin, cities }: HeaderProps) {
             <span className="header-user__name">{user.full_name}</span>
           </summary>
           <ul dir="ltr">
+            {favoriteCity && (
+              <li>
+                <Link to={`/${favoriteCity}`}>Mes lieux</Link>
+              </li>
+            )}
             <li>
-              <Link to={"/me"}>Mes réservations</Link>
+              <Link to={"/me"}>Mon profil</Link>
             </li>
             {admin != null && admin.type === "global" && (
               <Fragment key="admin">

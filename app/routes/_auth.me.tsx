@@ -8,6 +8,7 @@ import Avatar from "~/components/Avatar";
 import { FaSync } from "react-icons/fa";
 import { zfd } from "zod-form-data";
 import z from "zod";
+import { splitCities } from "~/services/domain/city.interface";
 
 export const meta: MetaFunction = () => [
   { title: "FourSFEIR | Mes réservations" },
@@ -35,6 +36,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 const actionSchema = zfd.formData(
   z.discriminatedUnion("_action", [
     z.object({
+      _action: z.literal("update-favorites"),
+      favorite: zfd.text(z.string()),
+      watched: zfd.repeatableOfType(z.string()),
+    }),
+    z.object({
       _action: z.literal("update-avatar"),
       full_name: zfd.text(z.string()),
       avatar_url: zfd.text(z.string().url())
@@ -44,10 +50,13 @@ const actionSchema = zfd.formData(
 export const action = async ({ request }: ActionFunctionArgs) => {
   const user = await getUserFromRequest(request);
   const f = actionSchema.parse(await request.formData());
-  const profile = await profileService.getProfileById(user.user_id);
 
   if (f._action === "update-avatar") {
-    const newProfile = { ...profile, user_id: user.user_id, full_name: f.full_name, avatar_url: f.avatar_url };
+    const newProfile = { user_id: user.user_id, full_name: f.full_name, avatar_url: f.avatar_url };
+    await profileService.updateProfile(newProfile);
+  }
+  if (f._action === "update-favorites") {
+    const newProfile = { user_id: user.user_id, favorite_city: `${f.favorite}${f.watched.length > 0 ? `+${f.watched.join("+")}` : ""}` };
     await profileService.updateProfile(newProfile);
   }
 
@@ -67,97 +76,146 @@ export default function MeRoute() {
     return date;
   }).filter((date): date is Temporal.PlainDate => date !== null);
 
+  const { main: favoriteCity, additional: watchedCities } = splitCities(profile?.favorite_city ?? "");
+
   return (
     <main className="container">
-      <h2>Mes réservations</h2>
+      <h2>Mon Profil</h2>
+      <article>
+        <header>
+          <h3>Mes réservations</h3>
+        </header>
 
-      <h3>
-        {currentMonth.toLocaleString("fr-FR", {
-          calendar: "iso8601",
-          month: "long",
-          year: "numeric",
-        })}
-      </h3>
+        <h3>
+          {currentMonth.toLocaleString("fr-FR", {
+            calendar: "iso8601",
+            month: "long",
+            year: "numeric",
+          })}
+        </h3>
 
-      {bookings.length === 0 ? (
-        <p>Aucune réservation ce mois-ci</p>
-      ) : (
-        <table className="calendar--compact">
-          <thead>
-            <tr>
-              <th>Lieu</th>
-              {dates.map((date) => (
-                <th key={date.toString()}>
-                  {date.toLocaleString("fr-FR", {
-                    weekday: "narrow",
-                    day: "numeric",
-                  })}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {cities.map((city) => (
-              <tr key={city.slug}>
-                <td>{city.label}</td>
-                {dates.map((date) => {
-                  const booking = bookings.find(
-                    (b) => b.city === city.slug && b.date === date.toString(),
-                  );
-                  return <td key={date.toString()}>{booking ? "✓" : ""}</td>;
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+        <div className="overflow-auto">
 
-      <Form>
-        <div className="grid">
-          <button name="month" value={prevMonth.toString()} className="outline">
-            ←{" "}
-            {prevMonth.toLocaleString("fr-FR", {
-              calendar: "iso8601",
-              month: "long",
-              year: "numeric",
-            })}
-          </button>
-          <button name="month" value={nextMonth.toString()} className="outline">
-            {nextMonth.toLocaleString("fr-FR", {
-              calendar: "iso8601",
-              month: "long",
-              year: "numeric",
-            })}{" "}
-            →
-          </button>
+          {bookings.length === 0 ? (
+            <p>Aucune réservation ce mois-ci</p>
+          ) : (
+            <table className="calendar--compact">
+              <thead>
+                <tr>
+                  <th>Lieu</th>
+                  {dates.map((date) => (
+                    <th key={date.toString()}>
+                      {date.toLocaleString("fr-FR", {
+                        weekday: "narrow",
+                        day: "numeric",
+                      })}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cities.map((city) => (
+                  <tr key={city.slug}>
+                    <td>{city.label}</td>
+                    {dates.map((date) => {
+                      const booking = bookings.find(
+                        (b) => b.city === city.slug && b.date === date.toString(),
+                      );
+                      return <td key={date.toString()}>{booking ? "✓" : ""}</td>;
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
-      </Form>
 
-      <h2>Profil</h2>
+        <Form>
+          <div className="grid">
+            <button name="month" value={prevMonth.toString()} className="outline">
+              ←{" "}
+              {prevMonth.toLocaleString("fr-FR", {
+                calendar: "iso8601",
+                month: "long",
+                year: "numeric",
+              })}
+            </button>
+            <button name="month" value={nextMonth.toString()} className="outline">
+              {nextMonth.toLocaleString("fr-FR", {
+                calendar: "iso8601",
+                month: "long",
+                year: "numeric",
+              })}{" "}
+              →
+            </button>
+          </div>
+        </Form>
+      </article>
 
       <div className="grid">
         <article>
-          <header>Session Google</header>
+          <header>
+            <h3>Lieux favoris</h3>
+          </header>
+          <Form method="post" action="/me">
+            <input type="hidden" name="_action" value="update-favorites" />
+            <label htmlFor="favorite-city">
+              Lieu favori:
+              <select name="favorite" id="favorite-city" defaultValue={favoriteCity}>
+                <option disabled value="">Sélectionner un lieu favori</option>
+                {cities.map((city) => (
+                  <option key={city.slug} value={city.slug}>{city.label}</option>
+                ))}
+              </select>
+            </label>
+            <fieldset aria-describedby="additional-helper">
+              <legend>Lieux additionnels</legend>
+              {cities.map((city) => (
+                <>
+                  <input type="checkbox"
+                    name="watched"
+                    defaultChecked={watchedCities.some((c) => c === city.slug)}
+                    value={city.slug}
+                    id={`watch-${city.slug}`}
+                  />
+                  <label htmlFor={`watch-${city.slug}`}>{city.label}</label>
+                </>
+              ))}
+            </fieldset>
+            <small id="additional-helper">
+              Sélectionnez les lieux additionnels que vous souhaitez surveiller. Ces lieux seront affichés en plus de votre lieu favori dans votre calendrier.
+              Vous n'avez pas besoin de sélectionner votre lieu favori.
+            </small>
+            <button type="submit">Mettre à jour mes favoris</button>
+          </Form>
+        </article>
+
+        <article>
+          <header>
+            <h3>Synchronisation profil</h3>
+          </header>
+
           <div className="grid">
-            <Avatar className="avatar--huge" profile={user} />
-            <p className="center-content">{user.full_name}</p>
+            <article>
+              <header>Session Google</header>
+              <Avatar className="avatar--huge" profile={user} />
+              <p className="center-content">{user.full_name}</p>
+            </article>
+            <Form className="center-content" method="post" action="/me">
+              <input type="hidden" name="_action" value="update-avatar" />
+              <input type="hidden" name="full_name" value={user.full_name} />
+              <input type="hidden" name="avatar_url" value={user.avatar_url} />
+              <button type="submit"><FaSync /> Synchroniser</button>
+            </Form>
+            {profile && (
+              <article>
+                <header>Profil Foursfeir</header>
+                <Avatar className="avatar--huge" profile={profile} />
+                <p className="center-content">{profile.full_name}</p>
+              </article>
+            )}
           </div>
         </article>
-        <Form className="center-content" method="post" action="/me">
-          <input type="hidden" name="_action" value="update-avatar" />
-          <input type="hidden" name="full_name" value={user.full_name} />
-          <input type="hidden" name="avatar_url" value={user.avatar_url} />
-          <button type="submit"><FaSync /> Synchroniser</button>
-        </Form>
-        {profile && (
-          <article>
-            <header>Profil Foursfeir</header>
-            <div className="grid">
-              <Avatar className="avatar--huge" profile={profile} />
-              <p className="center-content">{profile.full_name}</p>
-            </div>
-          </article>
-        )}
       </div>
     </main>
   );

@@ -36,3 +36,8 @@ export interface CityService {
 export function isNotice(n: Notice | Error | null): n is Notice {
   return !(n instanceof Error) && n?.message != null;
 }
+
+export function splitCities(combined: string): {main: string, additional: string[]} {
+  const [main, ...additional] = combined.split("+");
+  return { main, additional };
+}

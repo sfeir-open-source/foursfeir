@@ -1,0 +1,8 @@
+indexes:
+
+- kind: City
+  ancestor: no
+  properties:
+  - name: slug
+    direction: asc
+  

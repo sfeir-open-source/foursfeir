@@ -9,16 +9,19 @@ import { authenticator, getUserFromRequest } from "~/services/auth.server";
 import invariant from "~/services/validation.utils.server";
 import { Temporal } from "temporal-polyfill";
 import { bookingService, cityService, profileService } from "~/services/application/services.server";
-import { IndexedBooking } from "~/services/domain/booking.interface";
+import { Booking, IndexedBooking } from "~/services/domain/booking.interface";
 import { getOccupancy } from "~/services/domain/booking.interface";
 import { getRequestPeriod, getAllDatesFromPeriod } from "~/services/domain/booking.interface";
 import { emailToFoursfeirId, Profile } from "~/services/domain/profile.interface";
-import { isNotice } from "~/services/domain/city.interface";
+import { isNotice, splitCities } from "~/services/domain/city.interface";
 
 export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   invariant(params.city, "No city given");
   const user = await getUserFromRequest(request);
-  const city = await cityService.getCity(params.city);
+
+  const { main, additional } = splitCities(params.city);
+  const city = await cityService.getCity(main);
+  const additionalCities = await cityService.getCities().then((cities) => cities.filter((c) => additional.includes(c.slug)));
 
   const search = new URL(request.url).searchParams;
   const [start, end] = getRequestPeriod(
@@ -28,12 +31,13 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
     Number(search.get("weeks") ?? 2),
   );
 
-  const [periodBookings, notices] = await Promise.all([
+  const [periodBookings, notices, ...additionalPeriodBookings] = await Promise.all([
     bookingService.getBookingsRange(city.slug, start, end),
     cityService.getNotices(city.slug, { after: start, before: end }),
+    ...additionalCities.map((c) => bookingService.getBookingsRange(c.slug, start, end)),
   ]);
 
-  const bookingsDailies = [
+  const bookingsDailies: IndexedBooking[] = [
     ...periodBookings
       .reduce((previous, booking) => {
         previous.set(
@@ -48,6 +52,9 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
       .values(),
   ];
 
+  const additionalBookingsDailies: Booking[] = additionalPeriodBookings.flat().toSorted((a, b) => a.date.toString().localeCompare(b.date.toString()));
+
+
   const days = getAllDatesFromPeriod([start, end]);
   const occupancies = days.map((day) =>
     getOccupancy(bookingsDailies.flat().filter(({ date }) => date === day)),
@@ -61,10 +68,21 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
       }),
     );
 
+  const additionalSortedByDayWithProfile: (Booking & { profile: Profile })[] =
+    await Promise.all(
+      additionalBookingsDailies.map(async (booking) => {
+        const profile = await profileService.loader.load(booking.user_id);
+        return { ...booking, profile: profile! };
+      }),
+    );
+
   return json({
+    city,
+    additionalCities,
     days,
     occupancies,
     bookings: sortedByDayWithProfile ?? [],
+    additionalBookings: additionalSortedByDayWithProfile ?? [],
     capacity: city.capacity,
     maxCapacity: city.max_capacity,
     notices: notices.filter(isNotice) ?? [],
@@ -72,74 +90,18 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   });
 };
 
-const schema = zfd.formData(
-  z.union([
-    z.object({
-      _action: z.literal("book"),
-      date: zfd.text(z.string().date().transform((d) => Temporal.PlainDate.from(d))),
-      period: zfd.text(z.enum(["day", "morning", "afternoon"])),
-    }),
-    z.object({
-      _action: z.literal("remove"),
-      user_id: zfd.text(),
-      date: zfd.text(z.string().date().transform((d) => Temporal.PlainDate.from(d))),
-    }),
-  ]),
-);
-
-export const action = async ({ request, params }: ActionFunctionArgs) => {
-  invariant(params.city, "No city given");
-
-  const form = await request.formData();
-  const f = schema.parse(form);
-
-  const user = await authenticator.isAuthenticated(request, {
-    failureRedirect: "/login",
-  });
-
-  if (f._action === "book") {
-    const user_id = emailToFoursfeirId(user.email);
-
-    const profile = await profileService.getProfileById(user_id);
-    if (!profile) {
-      await profileService.createProfile({
-        user_id,
-        email: user.email,
-        full_name: user.full_name,
-        avatar_url: user.avatar_url,
-      });
-    }
-
-    await bookingService.upsertBooking({
-      city: params.city,
-      user_id,
-      date: f.date,
-      guests: { day: 0, morning: 0, afternoon: 0 },
-      period: f.period,
-      booked_by: null,
-      created_at: Temporal.Now.instant(),
-    });
-
-    return new Response(null, { status: 201 });
-  } else {
-    await bookingService.deleteBooking({
-      city: params.city,
-      user_id: f.user_id,
-      date: f.date,
-    });
-    return new Response(null, { status: 202 });
-  }
-};
 
 export default function Current() {
-  const { city } = useParams();
-  const { days, occupancies, bookings, notices, capacity, maxCapacity, user } =
+  const { city: combinedSlug } = useParams();
+  const { city, additionalCities, days, occupancies, bookings, additionalBookings, notices, capacity, maxCapacity, user } =
     useLoaderData<typeof loader>();
 
   return (
     <>
+      <h1> Réservations à {city.label} {additionalCities.length > 0 ? `et ${additionalCities.map((c) => c.label).join(", ")}` : ""}</h1>
       {days.map((day, i) => {
         const dayBookings = bookings.filter(({ date }) => date === day);
+        const additionalDayBookings = additionalBookings.filter(({ date }) => date === day);
         const notice = notices.find((n) => n.date === day);
         const date = Temporal.PlainDate.from(day);
         return (
@@ -152,8 +114,10 @@ export default function Current() {
             date={date}
             notice={notice?.message}
             bookings={dayBookings}
+            additionalBookings={additionalDayBookings}
             userId={user!.user_id}
-            city={city!}
+            combinedSlug={combinedSlug!}
+            city={city.slug}
             capacity={notice?.temp_capacity ?? capacity}
             maxCapacity={notice?.temp_capacity ?? maxCapacity}
           />

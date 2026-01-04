@@ -6,6 +6,8 @@
   languages.typescript.enable = true;
 
   # https://devenv.sh/pre-commit-hooks/
+
+  packages = [ pkgs.google-cloud-sdk ];
   # pre-commit.hooks.shellcheck.enable = true;
 
   # https://devenv.sh/processes/

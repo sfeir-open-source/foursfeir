@@ -3,6 +3,7 @@ import { BookingService, Booking } from "../../domain/booking.interface";
 import { KINDS } from "../../infrastructure/db/datastore";
 import { PropertyFilter, Datastore, and, Key } from "@google-cloud/datastore";
 import { Collator } from "~/services/collator.utils";
+import { splitCities } from "~/services/domain/city.interface";
 
 export class DatastoreBookingService implements BookingService {
 	private readonly client: Datastore;
@@ -32,9 +33,10 @@ export class DatastoreBookingService implements BookingService {
 	// }
 
 	private async createBooking(data: Omit<Booking, "created_at">): Promise<Booking> {
-		const key = this.client.key([KINDS.city, data.city, KINDS.date, data.date.toString(), KINDS.booking]);
+    const { main } = splitCities(data.city);
+		const key = this.client.key([KINDS.city, main, KINDS.date, data.date.toString(), KINDS.booking]);
 		const now = Temporal.Now.instant();
-		await this.client.save({ key, data: { ...data, date: data.date.toString(), created_at: now.toString() } });
+		await this.client.save({ key, data: { ...data, city: main, date: data.date.toString(), created_at: now.toString() } });
 		return { ...data, created_at: now };
 	}
 
@@ -49,16 +51,18 @@ export class DatastoreBookingService implements BookingService {
 	}
 
 	async upsertBooking(data: Booking): Promise<Booking> {
-		const existingBooking = await this.getBookingKey(data.city, Temporal.PlainDate.from(data.date), data.user_id);
+    const { main } = splitCities(data.city);
+		const existingBooking = await this.getBookingKey(main, Temporal.PlainDate.from(data.date), data.user_id);
 		if (existingBooking) {
-			return this.updateBooking(existingBooking, data);
+			return this.updateBooking(existingBooking, { ...data, city: main });
 		}
 		return this.createBooking(data);
 	}
 
 
 	async deleteBooking(booking: Pick<Booking, "city" | "user_id" | "date">): Promise<void> {
-		const key = await this.getBookingKey(booking.city, Temporal.PlainDate.from(booking.date), booking.user_id);
+    const { main } = splitCities(booking.city);
+		const key = await this.getBookingKey(main, Temporal.PlainDate.from(booking.date), booking.user_id);
 		if (key) {
 			await this.client.delete(key);
 		}

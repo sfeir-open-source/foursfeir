@@ -44,6 +44,7 @@ import { Temporal } from "temporal-polyfill";
 import ProfileSearch from "~/components/ProfileSearch";
 import type { Profile } from "~/services/domain/profile.interface";
 import { Collator } from "~/services/collator.utils";
+import { splitCities } from "~/services/domain/city.interface";
 
 
 
@@ -61,126 +62,40 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 
   const user = await getUserFromRequest(request);
 
-  const [city, notice, rawBookings, admin] = await Promise.all([
-    cityService.getCity(params.city),
-    cityService.getNotice(params.city, date),
-    bookingService.getBookings(params.city, date),
-    adminService.isUserAdmin(user.user_id, params.city),
+  const { main, additional } = splitCities(params.city);
+
+  const [city, notice, rawBookings, rawAdditionalBookingsies, admin] = await Promise.all([
+    cityService.getCity(main),
+    cityService.getNotice(main, date),
+    bookingService.getBookings(main, date),
+    Promise.all(additional.map((c) => bookingService.getBookings(c, date))),
+    adminService.isUserAdmin(user.user_id, main),
   ]);
+
+  const rawAdditionalBookings = rawAdditionalBookingsies.flat();
 
   const bookings = indexBookings(rawBookings);
 
   const profiles = await Promise.all(
-    bookings.map((b) => profileService.loader.load(b.user_id))
+    [...bookings, ...rawAdditionalBookings].map((b) => profileService.loader.load(b.user_id))
   );
   const occupancy = getOccupancy(bookings);
   const grouped = groupBookings(bookings);
+
+  const additionalGrouped = groupBookings(rawAdditionalBookings.flat());
 
   return json({
     city: city,
     notice: notice?.message,
     tempCapacity: notice?.temp_capacity,
     bookings: grouped,
+    additionalBookings: additionalGrouped,
     selfBooking: bookings.find((b) => b.user_id === user.user_id),
     occupancy,
     profiles: profiles.filter((p: Profile | null): p is Profile => p != null),
     user,
     admin,
   });
-};
-
-const schema = zfd.formData(
-  z.discriminatedUnion("_action", [
-    z.object({
-      _action: z.literal("book"),
-      period: zfd.text(z.enum(["day", "morning", "afternoon"])),
-      for_user: z.object({
-        id: zfd.text(z.string().uuid()).optional(),
-        email: zfd.text(z.string().email()),
-        full_name: zfd.text(z.string().min(2).max(100)),
-      }),
-    }),
-    z.object({
-      _action: z.literal("invite"),
-      period: zfd.text(z.enum(["day", "morning", "afternoon"])),
-      guests: z
-        .object({
-          day: zfd.numeric(z.number().int().min(0).max(10)).optional(),
-          morning: zfd.numeric(z.number().int().min(0).max(10)).optional(),
-          afternoon: zfd.numeric(z.number().int().min(0).max(10)).optional(),
-        })
-        .optional(),
-    }),
-    z.object({
-      _action: z.literal("remove"),
-      user_id: zfd.text(z.string().uuid()),
-    }),
-  ]),
-);
-
-export const action = async ({ request, params }: ActionFunctionArgs) => {
-  invariant(params.city, "No city given");
-  invariant(params.date, "No date given");
-  const user = await getUserFromRequest(request);
-  const date = Temporal.PlainDate.from(params.date);
-  const f = schema.parse(await request.formData());
-
-  if (f._action === "book") {
-    if (f.for_user) {
-      const otherId = f.for_user.id ?? emailToFoursfeirId(f.for_user.email);
-      const other = await profileService.getProfileById(otherId);
-
-      if (other == null) {
-        await profileService.createProfile({
-          user_id: otherId,
-          email: f.for_user.email,
-          full_name: f.for_user.full_name,
-        });
-      }
-
-      await bookingService.upsertBooking({
-        city: params.city,
-        date: date,
-        user_id: otherId,
-        period: f.period,
-        booked_by: emailToFoursfeirId(user.email),
-        guests: {},
-        created_at: Temporal.Now.instant(),
-      });
-    }
-
-    return new Response(null, { status: 201 });
-  }
-
-  if (f._action === "invite") {
-    const other = await profileService.getProfileById(user.user_id);
-
-    if (!other) {
-      await profileService.createProfile({
-        user_id: emailToFoursfeirId(user.email),
-        email: user.email,
-        full_name: user.full_name,
-        avatar_url: user.avatar_url,
-      });
-    }
-
-    await bookingService.upsertBooking({
-      city: params.city,
-      date: Temporal.PlainDate.from(params.date),
-      user_id: emailToFoursfeirId(user.email),
-      period: f.period,
-      booked_by: null,
-      guests: f.guests ?? {},
-      created_at: Temporal.Now.instant(),
-    });
-    return new Response(null, { status: 202 });
-  }
-
-  const admin = await adminService.isUserAdmin(user.user_id, params.city!);
-  if (admin && f._action === "remove") {
-    await bookingService.deleteBooking({ city: params.city, user_id: f.user_id, date: Temporal.PlainDate.from(params.date) });
-    return new Response(null, { status: 202 });
-  }
 };
 
 export const links: LinksFunction = () => [
@@ -201,14 +116,11 @@ export default function Current() {
     tempCapacity,
     profiles,
     admin,
+    additionalBookings,
   } = useLoaderData<typeof loader>();
   const { capacity, max_capacity: maxCapacity } = city;
-  const navigation = useNavigation();
   const deleteFetcher = useFetcher();
-  const [searchParams, setSearchParams] = useSearchParams();
 
-  const sortSchema = z.enum(["created_at", "period"]).nullable();
-  const sort = sortSchema.safeParse(searchParams.get("sort")).data ?? "period";
 
   const day = Temporal.PlainDate.from(dateStr!);
   const today = Temporal.Now.plainDateISO();
@@ -262,174 +174,165 @@ export default function Current() {
       </p>
       <div className="grid">
         <div className="calendar-people">
-          {sort === "period" ? (
-            // Tri par période
-            (["morning", "day", "afternoon"] as Period[]).map((period) => {
-              const periodBookings = bookings[period];
-              if (periodBookings.length === 0) return null;
+          <h2>Inscriptions sur {city.label}</h2>
+          {(["morning", "day", "afternoon"] as Period[]).map((period) => {
+            const periodBookings = bookings[period];
+            if (periodBookings.length === 0) return null;
 
-              return (
-                <Fragment key={period}>
-                  <h3>{periods[period]}</h3>
-                  <ul className="calendar-people__list">
-                    {periodBookings
-                      .sort(
-                        Collator.byKey("created_at", Collator.string)
-                      )
-                      .map((booking) => {
-                        const profile = profiles.find(
-                          (p) => p.user_id === booking.user_id,
-                        )!;
-                        const isDeleteSubmitting =
-                          deleteFetcher.state !== "idle" &&
-                          deleteFetcher.formData?.get("user_id") == profile.user_id;
-                        const isOverflow = isOverflowBooking(booking as any, capacity);
-                        const guestsString = formatter.format(
-                          Object.entries(booking.guests)
-                            .filter((p): p is [string, number] => typeof p[1] === "number" && p[1] > 0)
-                            .map((p: [string, number]) => `${p[1]} ${periods[p[0] as Period]}`),
-                        );
+            return (
+              <Fragment key={period}>
+                <h3>{periods[period]}</h3>
+                <ul className="calendar-people__list">
+                  {periodBookings
+                    .sort(
+                      Collator.byKey("created_at", Collator.string)
+                    )
+                    .map((booking) => {
+                      const profile = profiles.find(
+                        (p) => p.user_id === booking.user_id,
+                      )!;
+                      const isDeleteSubmitting =
+                        deleteFetcher.state !== "idle" &&
+                        deleteFetcher.formData?.get("user_id") == profile.user_id;
+                      const isOverflow = isOverflowBooking(booking as any, capacity);
+                      const guestsString = formatter.format(
+                        Object.entries(booking.guests)
+                          .filter((p): p is [string, number] => typeof p[1] === "number" && p[1] > 0)
+                          .map((p: [string, number]) => `${p[1]} ${periods[p[0] as Period]}`),
+                      );
 
-                        return (
-                          <li key={profile.user_id} aria-busy={isDeleteSubmitting}>
-                            <Avatar
-                              className={cx("avatar", {
-                                "avatar--overflow": isOverflow,
-                                "avatar--partial": booking.period != "day",
-                              })}
-                              profile={profile}
-                            />
-                            <span>{profile.full_name ?? profile.email}</span>
-                            {guestsString && ` (+${guestsString})`}
-                            {isOverflow && ` (Surnuméraire)`}
-                            {admin && isFuture && (
-                              <span>
-                                {" "}
-                                <deleteFetcher.Form
-                                  method="post"
-                                  className="inline-form"
-                                >
-                                  <input
-                                    type="hidden"
-                                    name="user_id"
-                                    value={profile.user_id}
-                                  />
-
-                                  <button
-                                    className="inline-button icon"
-                                    name="_action"
-                                    value="remove"
-                                  >
-                                    <FiUserMinus
-                                      title="Désinscrire"
-                                      aria-label="Désinscrire"
-                                    />
-                                  </button>
-                                </deleteFetcher.Form>
-                              </span>
-                            )}
-                          </li>
-                        );
-                      })}
-                  </ul>
-                </Fragment>
-              );
-            })
-          ) : (
-            // Tri par date d'inscription
-            <>
-              <h3>Inscrits</h3>
-              <ul className="calendar-people__list">
-                {Object.values(bookings)
-                  .flat()
-                  .sort(
-                    Collator.byKey("created_at", Collator.string)
-                  )
-                  .map((booking) => {
-                    const profile = profiles.find(
-                      (p) => p.user_id === booking.user_id,
-                    )!;
-                    const isDeleteSubmitting =
-                      deleteFetcher.state !== "idle" &&
-                      deleteFetcher.formData?.get("user_id") == profile.user_id;
-                    const isOverflow = isOverflowBooking(booking as any, capacity);
-                    const guestsString = formatter.format(
-                      Object.entries(booking.guests)
-                        .filter((p): p is [string, number] => typeof p[1] === "number" && p[1] > 0)
-                        .map((p: [string, number]) => `${p[1]} ${periods[p[0] as Period]}`),
-                    );
-                    return (
-                      <li key={profile.user_id} aria-busy={isDeleteSubmitting}>
-                        <Avatar
-                          className={cx("avatar", {
-                            "avatar--overflow": isOverflow,
-                            "avatar--partial": booking.period != "day",
-                          })}
-                          profile={profile}
-                        />
-                        <span>
-                          {profile.full_name ?? profile.email} (
-                          {periods[booking.period]})
-                        </span>
-                        {guestsString && ` (+${guestsString})`}
-                        {isOverflow && ` (Surnuméraire)`}
-                        {admin && isFuture && (
-                          <span>
-                            {" "}
-                            <deleteFetcher.Form
-                              method="post"
-                              className="inline-form"
-                            >
-                              <input
-                                type="hidden"
-                                name="user_id"
-                                value={profile.user_id}
-                              />
-
-                              <button
-                                className="inline-button icon"
-                                name="_action"
-                                value="remove"
+                      return (
+                        <li key={profile.user_id} aria-busy={isDeleteSubmitting}>
+                          <Avatar
+                            className={cx("avatar", {
+                              "avatar--overflow": isOverflow,
+                              "avatar--partial": booking.period != "day",
+                            })}
+                            profile={profile}
+                          />
+                          <span>{profile.full_name ?? profile.email}</span>
+                          {guestsString && ` (+${guestsString})`}
+                          {isOverflow && ` (Surnuméraire)`}
+                          {admin && isFuture && (
+                            <span>
+                              {" "}
+                              <deleteFetcher.Form
+                                method="post"
+                                action="/bookings"
+                                className="inline-form"
                               >
-                                <FiUserMinus
-                                  title="Désinscrire"
-                                  aria-label="Désinscrire"
-                                />
-                              </button>
-                            </deleteFetcher.Form>
-                          </span>
-                        )}
-                      </li>
-                    );
-                  })}
-              </ul>
-            </>
-          )}
+                                <input type="hidden" name="user_id" value={booking.user_id} />
+                                <input type="hidden" name="city" value={booking.city} />
+                                <input type="hidden" name="date" value={booking.date} />
+
+                                <button
+                                  className="inline-button icon"
+                                  name="_action"
+                                  value="admin-remove"
+                                >
+                                  <FiUserMinus
+                                    title="Désinscrire"
+                                    aria-label="Désinscrire"
+                                  />
+                                </button>
+                              </deleteFetcher.Form>
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                </ul>
+              </Fragment>
+            );
+          })
+          }
         </div>
-        <div>
-          <label htmlFor="sort-select">Trier par :</label>
-          <Form className="inline">
-            <select
-              id="sort-select"
-              name="sort"
-              onChange={(e) => {
-                setSearchParams({ sort: e.target.value });
-              }}
-              defaultValue={sort ?? "period"}
-            >
-              <option value="period">Période</option>
-              <option value="created_at">Ordre d&apos;inscription</option>
-            </select>
-          </Form>
+        <div className="calendar-people">
+          <h2>Inscriptions additionnelles</h2>
+          {(["morning", "day", "afternoon"] as Period[]).map((period) => {
+            const periodBookings = additionalBookings[period];
+            if (periodBookings.length === 0) return null;
+
+            return (
+              <Fragment key={period}>
+                <h3>{periods[period]}</h3>
+                <ul className="calendar-people__list">
+                  {periodBookings
+                    .sort(
+                      Collator.byKey("created_at", Collator.string)
+                    )
+                    .map((booking) => {
+                      const profile = profiles.find(
+                        (p) => p.user_id === booking.user_id,
+                      )!;
+                      const isDeleteSubmitting =
+                        deleteFetcher.state !== "idle" &&
+                        deleteFetcher.formData?.get("user_id") == profile.user_id;
+                      const isOverflow = isOverflowBooking(booking as any, capacity);
+                      const guestsString = formatter.format(
+                        Object.entries(booking.guests)
+                          .filter((p): p is [string, number] => typeof p[1] === "number" && p[1] > 0)
+                          .map((p: [string, number]) => `${p[1]} ${periods[p[0] as Period]}`),
+                      );
+
+                      return (
+                        <li key={profile.user_id} aria-busy={isDeleteSubmitting}>
+                          <Avatar
+                            className={cx("avatar", {
+                              "avatar--overflow": isOverflow,
+                              "avatar--partial": booking.period != "day",
+                            })}
+                            profile={profile}
+                          />
+                          <span>{profile.full_name ?? profile.email}</span>
+                          {guestsString && ` (+${guestsString})`}
+                          {isOverflow && ` (Surnuméraire)`}
+                          {admin && isFuture && (
+                            <span>
+                              {" "}
+                              <deleteFetcher.Form
+                                method="post"
+                                action="/bookings"
+                                className="inline-form"
+                              >
+                                <input type="hidden" name="user_id" value={booking.user_id} />
+                                <input type="hidden" name="city" value={booking.city} />
+                                <input type="hidden" name="date" value={booking.date} />
+
+                                <button
+                                  className="inline-button icon"
+                                  name="_action"
+                                  value="admin-remove"
+                                >
+                                  <FiUserMinus
+                                    title="Désinscrire"
+                                    aria-label="Désinscrire"
+                                  />
+                                </button>
+                              </deleteFetcher.Form>
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                </ul>
+              </Fragment>
+            );
+          })
+          }
         </div>
+
       </div>
 
       {isFuture && (
         <div className="grid">
-          <Form method="post">
-            <input type="hidden" name="_action" value="invite" />
+          <deleteFetcher.Form method="post" action="/bookings">
+            <input type="hidden" name="city" value={city.slug} />
+            <input type="hidden" name="date" value={day.toString()} />
+            <input type="hidden" name="_action" value="book" />
             <fieldset className="guest-form">
-              <legend>Je m&apos;inscris</legend>
+              <legend>Je m&apos;inscris sur {city.label}</legend>
+
               <fieldset role="group">
                 <legend>Mon inscription</legend>
                 <label>
@@ -507,16 +410,18 @@ export default function Current() {
               <button
                 type="submit"
                 disabled={isFull}
-                aria-busy={navigation.state === "submitting"}
+                aria-busy={deleteFetcher.state === "submitting"}
               >
                 M'inscrire
               </button>
             </fieldset>
-          </Form>
-          <Form method="post">
-            <input type="hidden" name="_action" value="book" />
+          </deleteFetcher.Form>
+          <deleteFetcher.Form method="post" action="/bookings">
+            <input type="hidden" name="_action" value="book-for" />
+            <input type="hidden" name="city" value={city.slug} />
+            <input type="hidden" name="date" value={day.toString()} />
             <fieldset className="colleague-form">
-              <legend>J&apos;inscris un/une autre Sferian à sa place</legend>
+              <legend>J&apos;inscris un/une autre Sferian à sa place sur {city.label}</legend>
               <label htmlFor="colleague-email">
                 Email
                 <ProfileSearch
@@ -558,12 +463,12 @@ export default function Current() {
               <button
                 type="submit"
                 disabled={isFull}
-                aria-busy={navigation.state === "submitting"}
+                aria-busy={deleteFetcher.state === "submitting"}
               >
                 Inscrire
               </button>
             </fieldset>
-          </Form>
+          </deleteFetcher.Form>
         </div>
       )}
     </>

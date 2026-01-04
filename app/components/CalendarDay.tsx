@@ -1,9 +1,9 @@
 import { Link, useFetcher } from "@remix-run/react";
 import { Temporal } from "temporal-polyfill";
 import cx from "classnames";
-import { BsPlusCircleDotted } from "react-icons/bs";
 
 import Avatar from "./Avatar";
+import { BookingsInlineSummary } from "./BookingsInlineSummary";
 import { Fragment } from "react";
 import {
   IndexedBooking,
@@ -11,6 +11,7 @@ import {
   groupBookings,
   Period,
   isOverflowBooking,
+  Booking,
 } from "~/services/domain/booking.interface";
 import { Profile } from "~/services/domain/profile.interface";
 import { emailToFoursfeirId } from "~/services/domain/profile.interface";
@@ -18,8 +19,10 @@ import { emailToFoursfeirId } from "~/services/domain/profile.interface";
 type Props = {
   date: Temporal.PlainDate;
   bookings: (IndexedBooking & { profile: Profile })[];
+  additionalBookings: (Booking & { profile: Profile })[];
   occupancy: number;
   userId: string;
+  combinedSlug: string;
   city: string;
   notice?: string;
   capacity: number;
@@ -31,7 +34,9 @@ export function CalendarDay({
   date,
   occupancy,
   bookings,
+  additionalBookings,
   userId,
+  combinedSlug,
   city,
   notice,
   capacity,
@@ -83,7 +88,7 @@ export function CalendarDay({
       <>
         <div>
           {isFuture && (
-            <fetcher.Form method="post" id={selfFormId}>
+            <fetcher.Form method="post" action="/bookings" id={selfFormId}>
               {self && (
                 <input
                   type="hidden"
@@ -91,6 +96,7 @@ export function CalendarDay({
                   value={self.user_id}
                 />
               )}
+              <input type="hidden" name="city" value={city} />
               <input type="hidden" name="date" value={date.toString()} />
               <input
                 type="hidden"
@@ -100,44 +106,18 @@ export function CalendarDay({
             </fetcher.Form>
           )}
           <details className="calendar-people">
-            <summary className="calendar-people__header">
-              <ul className="calendar-people__list calendar-people__list--inline">
-                {bookings.map((booking) => {
-                  const isOverflow = isOverflowBooking(booking, capacity);
-                  const overflowStr = isOverflow ? " (Surnuméraire)" : "";
-                  return (
-                    <li
-                      key={booking.user_id}
-                      data-tooltip={`${booking.profile?.full_name ?? booking.profile?.email
-                        } - ${periods[booking.period]}${overflowStr}`}
-                    >
-                      <Avatar
-                        className={cx({
-                          "avatar--partial": booking.period !== "day",
-                          "avatar--overflow": isOverflow,
-                        })}
-                        profile={booking.profile}
-                      />
-                    </li>
-                  );
-                })}
-                {!hasBooking && isFuture && !isFull && (
-                  <li>
-                    <button
-                      type="submit"
-                      form={selfFormId}
-                      name="period"
-                      value="day"
-                      className="inline-button no-button calendar-people__book-self"
-                    >
-                      <BsPlusCircleDotted className="avatar icon" />
-                    </button>
-                  </li>
-                )}
-              </ul>
-            </summary>
+            <BookingsInlineSummary
+              bookings={bookings}
+              additionalBookings={additionalBookings}
+              capacity={capacity}
+              hasBooking={hasBooking}
+              isFuture={isFuture}
+              isFull={isFull}
+              selfFormId={selfFormId}
+            />
             {Object.entries(periods).map(([period, label]) => {
               const bookings = byPeriod[period as Period];
+
               if (bookings.length > 0) {
                 return (
                   <Fragment key={period}>
@@ -159,6 +139,8 @@ export function CalendarDay({
                             <Avatar
                               className={cx({
                                 "avatar--partial": period !== "day",
+                                "avatar--morning": period === "morning",
+                                "avatar--afternoon": period === "afternoon",
                                 "avatar--overflow": isOverflow,
                               })}
                               profile={booking.profile}
@@ -174,6 +156,34 @@ export function CalendarDay({
                 );
               }
             })}
+            {additionalBookings.length > 0 && (
+              <Fragment>
+                <h3>Également inscrit•es</h3>
+                <ul className="calendar-people__list calendar-people--expanded">
+                  {additionalBookings.map((booking) => {
+                    const guestsString = formatter.format(
+                      Object.entries(booking.guests)
+                        .filter((p) => p[1] > 0)
+                        .map((p) => `${p[1]} ${periods[p[0] as Period]}`),
+                    );
+                    const { profile } = booking;
+                    return (
+                      <li key={profile?.user_id}>
+                        <Avatar
+                          className={cx("avatar--additional", {
+                            "avatar--partial": booking.period !== "day",
+                          })}
+                          profile={booking.profile}
+                        />
+                        <span>{profile?.full_name ?? profile?.email}</span>
+                        {guestsString && ` (+${guestsString})`} - {periods[booking.period]}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Fragment>
+            )}
+
             <div className="calendar-day__actions">
               {isFuture && (
                 <div>
@@ -234,7 +244,7 @@ export function CalendarDay({
                   )}
                 </div>
               )}
-              <Link to={`/${city}/${date.toString()}`}>Détails</Link>
+              <Link to={`/${combinedSlug}/${date.toString()}`}>Détails</Link>
             </div>
           </details>
         </div>

@@ -300,6 +300,10 @@ details.calendar-people[open]>*:not(summary) {
   width: 100%;
   display: flex;
   align-items: center;
+
+  &>div {
+    flex: 1;
+  }
 }
 
 .avatar--globaladmin {
@@ -349,13 +353,20 @@ details.calendar-people[open]>*:not(summary) {
   margin-inline-start: 1ex;
 }
 
-.calendar-people__list--inline li {
-  display: inline;
-  border-bottom: none;
-}
+.calendar-people__list--inline {
 
-.calendar-people__list--inline li+li {
-  margin-inline-start: -0.5ex;
+  &+& {
+    margin-block-start: -1ex;
+  }
+
+  li {
+    display: inline;
+    border-bottom: none;
+  }
+
+  li+li {
+    margin-inline-start: -0.5ex;
+  }
 }
 
 .day__name {
@@ -403,7 +414,7 @@ details.calendar-people[open]>*:not(summary) {
     min-width: 200px;
   }
 
-  .dropdown.header-user ul {
+  .dropdown.header-user>ul {
     position: absolute;
     z-index: 1001;
     top: 100%;
