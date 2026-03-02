@@ -124,7 +124,7 @@ export default function Current() {
         );
       })}
 
-      <Form className="calendar-day" method="get" action={`/${city}/redirect`}>
+      <Form className="calendar-day" method="get" action={`/${combinedSlug}/redirect`}>
         <fieldset role="group">
           <input type="date" name="date" />
           <button type="submit">Go</button>
